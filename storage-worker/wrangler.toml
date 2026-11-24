@@ -1,0 +1,22 @@
+name = "let-it-go-catalogues"
+main = "worker.js"
+compatibility_date = "2026-11-23"
+workers_dev = true
+
+[vars]
+# Origins include scheme + hostname only, never /repository paths or trailing slash.
+ALLOWED_ORIGINS = "https://YOUR-USERNAME.github.io"
+
+[[r2_buckets]]
+binding = "CATALOGUES"
+bucket_name = "let-it-go-catalogues"
+
+[[ratelimits]]
+name = "CREATE_LIMITER"
+namespace_id = "1001"
+[ratelimits.simple]
+limit = 5
+period = 60
+
+[triggers]
+crons = ["17 3 * * *"]
