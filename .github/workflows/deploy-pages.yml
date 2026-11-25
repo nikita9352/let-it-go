@@ -15,38 +15,59 @@ concurrency:
 
 jobs:
   build:
+    name: Build app and AI files
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v6
-
       - name: Configure Pages
         uses: actions/configure-pages@v5
-
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
           node-version: '22'
-
+      - name: Check source and browser logic
+        run: |
+          node checks/ai.test.cjs
+          node checks/ai-loader.test.cjs
+          node checks/pdf-only.test.cjs
+          node checks/mobile.test.cjs
+          node checks/pdf-file.test.cjs
+          node checks/diagnostics.test.cjs
+          python3 -m unittest discover -s checks -p '*_test.py'
       - name: Prepare static site with AI model
         run: python3 scripts/prepare_site.py
-
-      - name: Upload complete site
+      - name: Confirm AI files are in the published folder
+        run: |
+          test -s _site/ai-assets/manifest.json
+          test -s _site/ai-assets/runtime/transformers.min.js
+          test -s _site/ai-assets/runtime/ort-wasm-simd-threaded.jsep.wasm
+          test -s _site/ai-assets/models/Xenova/clip-vit-base-patch32/onnx/text_model_quantized.onnx
+          test -s _site/ai-assets/models/Xenova/clip-vit-base-patch32/onnx/vision_model_quantized.onnx
+      - name: Upload complete site including AI
         uses: actions/upload-pages-artifact@v4
         with:
           path: _site
-
   deploy:
+    name: Publish and verify AI installation
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: build
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Check out verification script
+        uses: actions/checkout@v6
       - name: Publish GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify published AI files
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: python3 scripts/verify_deployment.py --site-url "$PAGE_URL" --expected-commit "$GITHUB_SHA"
