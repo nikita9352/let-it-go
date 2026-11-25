@@ -2,7 +2,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const vm=require('node:vm');
-const context={console,Math,Number,Array,Object,Error,Promise,Set,Map,setTimeout,globalThis:null};context.globalThis=context;vm.createContext(context);
+const context={console,Math,Number,Array,Object,Error,Promise,Set,Map,URL,setTimeout,globalThis:null};context.globalThis=context;vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.resolve(__dirname,'../ai.js'),'utf8'),context);
 const ai=context.LetItGoAI;
 assert.equal(ai.model.id,'Xenova/clip-vit-base-patch32');assert.equal(ai.model.device,'wasm');assert(ai.candidates.length>=85);

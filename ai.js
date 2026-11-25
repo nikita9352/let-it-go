@@ -1,9 +1,11 @@
 /* Let It Go! Local image suggestions. Model files download; selected photos stay in the browser. */
 (function (global) {
   'use strict';
-  const LIBRARY_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
+  const TRANSFORMERS_VERSION = '3.8.1';
+  const assetBase = new URL('./ai-assets/', typeof document !== 'undefined' ? document.baseURI : 'https://localhost/');
   const MODEL_ID = 'Xenova/clip-vit-base-patch32';
-  const MODEL_INFO = Object.freeze({ id: MODEL_ID, library: 'Transformers.js 3.8.1', dtype: 'q8', device: 'wasm', approximateWeightDownloadMB: 154, identityVerification: false });
+  const MODEL_REVISION = 'd15189d7028b43f1d3e65039190477f6af591c2a';
+  const MODEL_INFO = Object.freeze({ id: MODEL_ID, library: 'Transformers.js 3.8.1', dtype: 'q8', device: 'wasm', approximateWeightDownloadMB: 154, source: 'this-website', identityVerification: false });
   const INVENTORY = {
     Furniture: ['Armchair','Dining chair','Office chair','Stool','Sofa','Dining table','Coffee table','Side table','Desk','Bookshelf','Wardrobe','Chest of drawers','Bed frame','Mattress','Shoe rack','TV stand','Bench','Folding table'],
     Electronics: ['Laptop','Mobile phone','Tablet','Computer monitor','Keyboard','Computer mouse','Headphones','Earphones','Speaker','Camera','Camera lens','Television','Game console','Wi-Fi router','Printer','Projector','Smartwatch','Power bank','Phone charger','Electrical cable','Remote control','Hair dryer','Electric fan','Vacuum cleaner','Iron','Air purifier'],
@@ -21,7 +23,12 @@
   const UNKNOWN = { label: 'unknown-item', title: 'Item to review', category: 'Other', prompt: 'an unrecognisable object, a document, an empty scene, a person or something that is not a product' };
   const CANDIDATES = [...LABELS, MIXED, UNKNOWN];
   const VIEW_PROMPTS = ['a clear complete view of one product, fully visible and centered', 'a close-up photograph of a small detail or label on a product', 'a dark, blurry, obstructed or poorly framed photograph of an object'];
-  let enginePromise = null;
+  let enginePromise = null, loadAttempt = 0, lastProgress = null;
+  const progressListeners = new Set();
+  function reportProgress(value) {
+    lastProgress = value;
+    for (const listener of progressListeners) { try { listener(value); } catch {} }
+  }
   const clamp = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, Number.isFinite(Number(v)) ? Number(v) : lo));
   function abortError() { const error = new Error('Photo analysis was cancelled.'); error.name = 'AbortError'; error.code = 'ANALYSIS_CANCELLED'; return error; }
   function checkSignal(signal) { if (signal?.aborted) throw abortError(); }
@@ -90,26 +97,56 @@
     });
   }
   function disposeTensors(container) { if (!container || typeof container !== 'object') return; for (const value of Object.values(container)) if (value && typeof value.dispose === 'function') { try { value.dispose(); } catch {} } }
-  async function loadEngine(onProgress) {
+  async function checkAssets() {
+    const setupMessage = 'The AI files are missing or incomplete on this website. In GitHub Settings → Pages, select GitHub Actions, then run the included Deploy Let It Go workflow. Downloading the ZIP alone does not install the model.';
+    if (assetBase.protocol !== 'https:' && assetBase.hostname !== 'localhost' && assetBase.hostname !== '127.0.0.1') {
+      const error = new Error('Open the published HTTPS GitHub Pages website to use AI. Opening index.html directly from a downloaded folder cannot load the model.');
+      error.code = 'AI_ASSETS_MISSING'; throw error;
+    }
+    let response;
+    try { response = await fetch(new URL('manifest.json', assetBase).href, { cache: 'no-cache', credentials: 'same-origin' }); }
+    catch { throw new Error('The AI files on this website could not be reached. Check your connection and reload the published page.'); }
+    if (!response.ok) { const error = new Error(setupMessage); error.code = 'AI_ASSETS_MISSING'; throw error; }
+    let manifest;
+    try { manifest = await response.json(); } catch { const error = new Error(setupMessage); error.code = 'AI_ASSETS_MISSING'; throw error; }
+    if (!manifest || typeof manifest !== 'object' || manifest.schemaVersion !== 1 || manifest.modelId !== MODEL_ID || manifest.modelRevision !== MODEL_REVISION || manifest.transformersVersion !== TRANSFORMERS_VERSION) {
+      const error = new Error(setupMessage); error.code = 'AI_ASSETS_MISSING'; throw error;
+    }
+    return manifest;
+  }
+  function warmEngine() {
     if (enginePromise) return enginePromise;
+    let step = 'checking the AI files';
     enginePromise = (async () => {
-      onProgress?.({ stage: 'loading', message: 'Loading the local image model. The first download is about 154 MB plus runtime files.' });
-      const transformers = await import(LIBRARY_URL);
-      transformers.env.allowLocalModels = false;
-      transformers.env.allowRemoteModels = true;
+      reportProgress({ stage: 'loading', message: 'Checking the AI files on this website…' });
+      await checkAssets();
+      step = 'loading the AI program';
+      reportProgress({ stage: 'loading', message: 'Loading the browser AI from this website…' });
+      const libraryUrl = new URL('runtime/transformers.min.js', assetBase);
+      libraryUrl.searchParams.set('v', TRANSFORMERS_VERSION);
+      libraryUrl.searchParams.set('attempt', String(++loadAttempt));
+      const transformers = await import(libraryUrl.href);
+      transformers.env.allowLocalModels = true;
+      transformers.env.allowRemoteModels = false;
+      transformers.env.localModelPath = new URL('models/', assetBase).href;
+      transformers.env.backends.onnx.wasm.wasmPaths = new URL('runtime/', assetBase).href;
       transformers.env.backends.onnx.wasm.numThreads = 1;
       transformers.env.backends.onnx.wasm.proxy = false;
-      const progress_callback = event => onProgress?.({ stage: 'downloading', message: event.file ? `Preparing ${event.file.split('/').pop()}…` : 'Preparing the local image model…', progress: Number.isFinite(event.progress) ? clamp(event.progress, 0, 100) : undefined });
+      const progress_callback = event => reportProgress({ stage: 'downloading', message: event.file ? `Downloading AI file ${event.file.split('/').pop()} from this website…` : 'Preparing the local image model…', progress: Number.isFinite(event.progress) ? clamp(event.progress, 0, 100) : undefined });
       const options = { dtype: 'q8', device: 'wasm', progress_callback };
+      step = 'loading the label settings';
       const tokenizer = await transformers.AutoTokenizer.from_pretrained(MODEL_ID, { progress_callback });
+      step = 'loading the photo settings';
       const processor = await transformers.AutoProcessor.from_pretrained(MODEL_ID, { progress_callback });
+      step = 'downloading the label model';
       const textModel = await transformers.CLIPTextModelWithProjection.from_pretrained(MODEL_ID, options);
       const prompts = [...CANDIDATES.map(c => c.prompt), ...VIEW_PROMPTS];
       const vectors = [], textBatchSize = 16;
       try {
+        step = 'preparing item labels';
         for (let offset = 0; offset < prompts.length; offset += textBatchSize) {
           const batch = prompts.slice(offset, offset + textBatchSize);
-          onProgress?.({ stage: 'loading', message: `Preparing item labels ${offset + 1}–${offset + batch.length} of ${prompts.length}…`, progress: offset / prompts.length * 100 });
+          reportProgress({ stage: 'loading', message: `Preparing item labels ${offset + 1}–${offset + batch.length} of ${prompts.length}…`, progress: offset / prompts.length * 100 });
           let tokens, textOutput;
           try {
             tokens = tokenizer(batch, { padding: true, truncation: true });
@@ -121,16 +158,41 @@
           await new Promise(resolve => setTimeout(resolve, 0));
         }
       } finally { await textModel.dispose(); }
+      step = 'downloading the image model';
       const visionModel = await transformers.CLIPVisionModelWithProjection.from_pretrained(MODEL_ID, options);
       return { processor, visionModel, RawImage: transformers.RawImage, vectors: vectors.slice(0, CANDIDATES.length), viewVectors: vectors.slice(CANDIDATES.length) };
-    })().catch(error => { enginePromise = null; const wrapped = new Error(`The local AI model could not be loaded. Check your connection, available browser memory and access to Hugging Face/CDN downloads. ${error.message || ''}`); wrapped.code = 'MODEL_UNAVAILABLE'; throw wrapped; });
+    })().catch(error => {
+      enginePromise = null;
+      if (error.code === 'AI_ASSETS_MISSING') throw error;
+      const wrapped = new Error(`The browser AI could not load while ${step}. ${error.message || ''} Check your connection and try again. If this continues, download a project backup before reloading, or continue editing manually.`);
+      wrapped.code = 'MODEL_UNAVAILABLE'; throw wrapped;
+    });
     return enginePromise;
+  }
+  async function loadEngine(onProgress, signal) {
+    checkSignal(signal);
+    const listener = value => { if (!signal?.aborted) onProgress?.(value); };
+    progressListeners.add(listener);
+    if (lastProgress) listener(lastProgress);
+    let abort;
+    try {
+      const pending = warmEngine();
+      if (!signal) return await pending;
+      return await Promise.race([pending, new Promise((_, reject) => {
+        abort = () => reject(abortError());
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) abort();
+      })]);
+    } finally {
+      progressListeners.delete(listener);
+      if (abort) signal.removeEventListener('abort', abort);
+    }
   }
   async function analysePhotos(photos, onProgress, options = {}) {
     checkSignal(options.signal);
     if (!Array.isArray(photos) || !photos.length) return { photos: [], groups: [], model: MODEL_INFO };
     if (photos.some(p => !p || !p.id || typeof p.dataUrl !== 'string' || !p.dataUrl.startsWith('data:image/'))) throw new Error('Provide valid local photo data before analysing.');
-    const engine = await loadEngine(onProgress);
+    const engine = await loadEngine(onProgress, options.signal);
     checkSignal(options.signal);
     const analysed = [];
     for (let index = 0; index < photos.length; index++) {
