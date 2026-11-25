@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  pages: read
 
 concurrency:
   group: pages
@@ -19,15 +18,77 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Check out source
+      - name: Check out upload
         uses: actions/checkout@v6
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
+      - name: Use the complete uploaded package
+        id: source
+        run: |
+          python3 - <<'PY'
+          # SOURCE_RESOLVER_BEGIN
+          from pathlib import Path, PurePosixPath
+          import os, shutil, stat, zipfile
+          
+          archive = Path('Let_It_Go_GitHub_Pages.zip')
+          destination = Path('_let_it_go_source')
+          if archive.is_file():
+              if destination.is_symlink() or destination.is_file():
+                  destination.unlink()
+              elif destination.exists():
+                  shutil.rmtree(destination)
+              try:
+                  with zipfile.ZipFile(archive) as package:
+                      entries = package.infolist()
+                      if len(entries) > 100 or sum(entry.file_size for entry in entries) > 50 * 1024 * 1024:
+                          raise ValueError('The source ZIP exceeds the 100-file / 50 MB source limit.')
+                      seen = set()
+                      for entry in entries:
+                          name = entry.filename
+                          path = PurePosixPath(name)
+                          if (not name or path.is_absolute() or '\\' in name or ':' in name
+                                  or any(part in ('.', '..') for part in name.rstrip('/').split('/'))
+                                  or any(ord(character) < 32 for character in name)
+                                  or stat.S_ISLNK(entry.external_attr >> 16)
+                                  or entry.flag_bits & 1):
+                              raise ValueError('Unsafe or encrypted source ZIP entry: ' + name)
+                          normalized = path.as_posix().rstrip('/')
+                          if not normalized or normalized in seen:
+                              raise ValueError('Duplicate source ZIP entry: ' + name)
+                          seen.add(normalized)
+                      package.extractall(destination)
+                  source = destination
+                  print('Using the complete source ZIP; older loose repository files are ignored.')
+              except (OSError, ValueError, zipfile.BadZipFile, RuntimeError) as error:
+                  if destination.exists():
+                      shutil.rmtree(destination)
+                  raise SystemExit('Cannot prepare Let_It_Go_GitHub_Pages.zip: ' + str(error))
+          else:
+              source = Path('.')
+              print('No source ZIP found; checking the expanded repository files.')
+          
+          required = (
+              'index.html', 'app.js', 'ai.js', 'pdf.js', 'pdf-lib.min.js', 'styles.css', 'icon.svg',
+              'diagnostics.html', 'diagnostics.js', 'diagnostics.css', 'assets/products.png',
+              'README.md', 'deploy-pages.yml', '.github/workflows/deploy-pages.yml',
+              'scripts/prepare_site.py', 'scripts/verify_deployment.py', 'scripts/package_release.py',
+              'checks/ai.test.cjs', 'checks/ai-loader.test.cjs', 'checks/pdf-only.test.cjs',
+              'checks/mobile.test.cjs', 'checks/pdf-file.test.cjs', 'checks/diagnostics.test.cjs',
+              'checks/prepare_site_test.py', 'checks/verify_deployment_test.py',
+              'checks/package_test.py', 'checks/upload_test.py',
+          )
+          missing = [name for name in required if not (source / name).is_file()]
+          if missing:
+              raise SystemExit('Incomplete Let It Go source. Upload the latest ORIGINAL Let_It_Go_GitHub_Pages.zip at repository root. Missing files: ' + ', '.join(missing))
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('source=' + source.as_posix() + '\n')
+          print('Source is complete. App, scripts and checks will all use ' + source.as_posix())
+          # SOURCE_RESOLVER_END
+          PY
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
           node-version: '22'
       - name: Check source and browser logic
+        working-directory: ${{ steps.source.outputs.source }}
         run: |
           node checks/ai.test.cjs
           node checks/ai-loader.test.cjs
@@ -37,8 +98,10 @@ jobs:
           node checks/diagnostics.test.cjs
           python3 -m unittest discover -s checks -p '*_test.py'
       - name: Prepare static site with AI model
+        working-directory: ${{ steps.source.outputs.source }}
         run: python3 scripts/prepare_site.py
       - name: Confirm AI files are in the published folder
+        working-directory: ${{ steps.source.outputs.source }}
         run: |
           test -s _site/ai-assets/manifest.json
           test -s _site/ai-assets/runtime/transformers.min.js
@@ -48,7 +111,7 @@ jobs:
       - name: Upload complete site including AI
         uses: actions/upload-pages-artifact@v4
         with:
-          path: _site
+          path: ${{ steps.source.outputs.source }}/_site
   deploy:
     name: Publish and verify AI installation
     runs-on: ubuntu-latest
@@ -62,12 +125,27 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Check out verification script
+      - name: Check out verification source
         uses: actions/checkout@v6
+      - name: Read verifier from the same uploaded package
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil, zipfile
+          archive = Path('Let_It_Go_GitHub_Pages.zip')
+          if archive.is_file():
+              with zipfile.ZipFile(archive) as package:
+                  info = package.getinfo('scripts/verify_deployment.py')
+                  if info.file_size > 256 * 1024:
+                      raise SystemExit('The deployment verifier is unexpectedly large.')
+                  Path('_let_it_go_verify.py').write_bytes(package.read(info))
+          else:
+              shutil.copy2('scripts/verify_deployment.py', '_let_it_go_verify.py')
+          PY
       - name: Publish GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
       - name: Verify published AI files
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
-        run: python3 scripts/verify_deployment.py --site-url "$PAGE_URL" --expected-commit "$GITHUB_SHA"
+        run: python3 _let_it_go_verify.py --site-url "$PAGE_URL" --expected-commit "$GITHUB_SHA"
